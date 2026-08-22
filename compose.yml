@@ -1,0 +1,16 @@
+services:
+  bashorg-bot:
+    build: .
+    image: bashorg-tg-bot:latest
+    container_name: bashorg-tg-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Внутри контейнера состояние всегда в смонтированном volume
+      DB_PATH: /app/data/state.db
+    volumes:
+      - bot-data:/app/data
+
+volumes:
+  bot-data:

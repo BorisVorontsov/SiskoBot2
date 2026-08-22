@@ -1,0 +1,27 @@
+# Секреты и локальная конфигурация
+.env
+
+# Состояние бота (SQLite)
+*.db
+*.db-shm
+*.db-wal
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Инструменты
+.pytest_cache/
+.ruff_cache/
+
+# IDE/ОС
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
