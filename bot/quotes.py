@@ -4,6 +4,9 @@
 иногда с двойным экранированием (``&amp;gt;``). Здесь он превращается в
 обычный текст с переносами строк, а при отправке — обратно экранируется
 под parse_mode=HTML. Никакой HTML/JS из ответа сайта не исполняется.
+
+Здесь же разбирается страница отдельной цитаты /quote/<id> — она нужна,
+чтобы выбирать цитаты из архива (а не только из 100 последних в RSS).
 """
 
 from __future__ import annotations
@@ -11,7 +14,11 @@ from __future__ import annotations
 import html
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+# Время на сайте — московское (+03:00), без перехода на летнее время.
+SITE_TZ = timezone(timedelta(hours=3))
+PAGE_DATE_FORMAT = "%d.%m.%Y в %H:%M"
 
 # Официальный лимит длины сообщения Telegram считается в кодовых единицах UTF-16.
 TG_MESSAGE_LIMIT = 4096
@@ -27,6 +34,12 @@ _BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
 _TAG_RE = re.compile(r"</?[a-zA-Z][a-zA-Z0-9]*(?:\s[^<>]*)?>")
 _MULTINEWLINE_RE = re.compile(r"\n{3,}")
 _QUOTE_ID_RE = re.compile(r"/quote/(\d+)")
+
+# Элементы страницы отдельной цитаты /quote/<id>.
+_PAGE_ID_RE = re.compile(r'data-quote="(\d+)"')
+_PAGE_DATE_RE = re.compile(r"quote__header_date[^>]*>\s*([^<]+?)\s*</div>")
+# Тело страницы ограничено <footer> следом за <div class="quote__body">.
+_PAGE_BODY_RE = re.compile(r'<div class="quote__body"[^>]*>(.*?)\s*<footer', re.S)
 
 
 @dataclass(frozen=True)
@@ -49,6 +62,43 @@ def extract_quote_id(link: str) -> str | None:
     """Достаёт числовой ID цитаты из ссылки вида https://башорг.рф/quote/470009."""
     match = _QUOTE_ID_RE.search(link or "")
     return match.group(1) if match else None
+
+
+def parse_page_quote(html_text: str, site_base_url: str) -> Quote | None:
+    """Разбирает страницу /quote/<id> в цитату; None — страница-заглушка.
+
+    У удалённых цитат сайт отдаёт 200, но без даты и тела. Также возвращаем
+    None при отсутствии ID, даты или текста — такие цитаты публиковать нельзя.
+    """
+    id_match = _PAGE_ID_RE.search(html_text)
+    if id_match is None:
+        return None
+    quote_id = id_match.group(1)
+
+    date_match = _PAGE_DATE_RE.search(html_text)
+    if date_match is None:
+        return None
+    try:
+        published_at = datetime.strptime(date_match.group(1).strip(), PAGE_DATE_FORMAT).replace(
+            tzinfo=SITE_TZ
+        )
+    except ValueError:
+        return None
+
+    body_match = _PAGE_BODY_RE.search(html_text)
+    if body_match is None:
+        return None
+
+    text = clean_quote_text(body_match.group(1))
+    if not text:
+        return None
+
+    return Quote(
+        id=quote_id,
+        text=text,
+        url=f"{site_base_url}/quote/{quote_id}",
+        published_at=published_at,
+    )
 
 
 def clean_quote_text(raw: str) -> str:

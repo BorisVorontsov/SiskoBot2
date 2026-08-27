@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from bot.feed import FeedError, fetch_feed, parse_feed
+from bot.feed import FeedError, fetch_feed, fetch_quote_page, parse_feed
 
 SITE_BASE = "https://башорг.рф"
 
@@ -134,3 +134,30 @@ class TestFetchFeed:
             body = await fetch_feed(client, f"{SITE_BASE}/rss/")
         with pytest.raises(FeedError):
             parse_feed(body, SITE_BASE)
+
+
+class TestFetchQuotePage:
+    """Страница отдельной цитаты: 404 — «удалённая» цитата, не ошибка."""
+
+    QUOTE_URL = f"{SITE_BASE}/quote/470009"
+
+    async def test_returns_body_on_200(self):
+        async with _client(lambda request: httpx.Response(200, text="<article>…")) as client:
+            assert await fetch_quote_page(client, self.QUOTE_URL) == "<article>…"
+
+    async def test_404_becomes_none(self):
+        async with _client(lambda request: httpx.Response(404, text="nope")) as client:
+            assert await fetch_quote_page(client, self.QUOTE_URL) is None
+
+    async def test_server_error_raises(self):
+        async with _client(lambda request: httpx.Response(503, text="busy")) as client:
+            with pytest.raises(FeedError, match="HTTP 503"):
+                await fetch_quote_page(client, self.QUOTE_URL)
+
+    async def test_network_error_raises(self):
+        def handler(request):
+            raise httpx.ReadTimeout("boom", request=request)
+
+        async with _client(handler) as client:
+            with pytest.raises(FeedError, match="Сетевая ошибка"):
+                await fetch_quote_page(client, self.QUOTE_URL)

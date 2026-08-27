@@ -1,8 +1,11 @@
-"""Получение и разбор RSS-ленты башорг.рф.
+"""Получение и разбор RSS-ленты и страниц цитат башорг.рф.
 
 Приоритетный источник данных — официальный RSS (https://башорг.рф/rss/),
 100 последних цитат. Это структурированный источник, поддерживаемый самим
 сайтом, поэтому HTML-парсинг и headless-браузеры не требуются.
+
+RSS также даёт максимальный ID цитаты на сегодня; сами исторические цитаты
+добираются со страниц /quote/<id> (см. bot/archive.py).
 """
 
 from __future__ import annotations
@@ -31,6 +34,23 @@ async def fetch_feed(client: httpx.AsyncClient, url: str) -> str:
         raise FeedError(f"HTTP {exc.response.status_code} при запросе {url}") from exc
     except httpx.HTTPError as exc:
         raise FeedError(f"Сетевая ошибка при запросе {url}: {exc!r}") from exc
+    return response.text
+
+
+async def fetch_quote_page(client: httpx.AsyncClient, url: str) -> str | None:
+    """Забирает HTML-страницу цитаты.
+
+    Возвращает None для 404 — это «удалённая» цитата, которую надо
+    пропустить, а не фатальная ошибка. Прочие HTTP/сетевые проблемы → FeedError.
+    """
+    try:
+        response = await client.get(url)
+    except httpx.HTTPError as exc:
+        raise FeedError(f"Сетевая ошибка при запросе {url}: {exc!r}") from exc
+    if response.status_code == 404:
+        return None
+    if response.status_code != 200:
+        raise FeedError(f"HTTP {response.status_code} при запросе {url}")
     return response.text
 
 

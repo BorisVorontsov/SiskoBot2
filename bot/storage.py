@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS state (
 """
 
 _CHAT_ID_KEY = "chat_id"
+_ARCHIVE_START_KEY = "archive_start_id"
 
 
 class Storage:
@@ -91,6 +92,26 @@ class Storage:
     def delete_chat_id(self) -> None:
         """Забывает сохранённый чат (после кика — для автоопределения нового)."""
         self._conn.execute("DELETE FROM state WHERE key = ?", (_CHAT_ID_KEY,))
+
+    def get_archive_start_id(self) -> int | None:
+        """Первая цитата пула (ID с датой ARCHIVE_START_DATE), либо None."""
+        row = self._conn.execute(
+            "SELECT value FROM state WHERE key = ?", (_ARCHIVE_START_KEY,)
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return int(row[0])
+        except ValueError:
+            log.warning("В хранилище повреждён archive_start_id=%r — игнорирую", row[0])
+            return None
+
+    def set_archive_start_id(self, start_id: int) -> None:
+        self._conn.execute(
+            "INSERT INTO state (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (_ARCHIVE_START_KEY, str(start_id)),
+        )
 
 
 def _utcnow_iso() -> str:

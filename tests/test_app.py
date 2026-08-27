@@ -6,6 +6,8 @@ import time
 from datetime import timedelta
 from types import SimpleNamespace
 
+import httpx
+
 from bot.app import (
     HELP_TEXT,
     PAUSE_EXPIRED,
@@ -208,5 +210,128 @@ class TestRecoverChat:
 
             assert new_chat_id == -100999000111
             assert app.storage.get_chat_id() == -100999000111
+        finally:
+            app.close()
+
+
+RSS_ONE = """<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+    <channel>
+        <title>Башорг.рф</title>
+        <atom:link href="https://bashorg.local/rss/" rel="self" type="application/rss+xml" />
+        <item>
+            <guid isPermaLink="false">200000</guid>
+            <link>https://bashorg.local/quote/200000</link>
+            <title>Цитата #200000</title>
+            <pubDate>Sat, 22 Aug 2026 09:10:01 +0300</pubDate>
+            <description><![CDATA[Свежая цитата из ленты&lt;br&gt;на случай фолбэка]]></description>
+        </item>
+    </channel>
+</rss>
+"""
+
+ARCHIVE_PAGE_199999 = """<article class="quote" data-quote="199999">
+            <div class="quote__frame">
+                <header class="quote__header">
+                    <a class="quote__header_permalink" href="/quote/199999">#199999</a>
+                    <div class="quote__header_date">
+                        10.05.2021 в 12:00
+                    </div>
+                </header>
+                <div class="quote__body">
+                    Старая цитата из архива.
+                </div>
+                <footer class="quote__footer"></footer>
+            </div>
+        </article>"""
+
+
+def _rss_handler(request: httpx.Request) -> httpx.Response:
+    if request.url.path.startswith("/rss"):
+        return httpx.Response(200, text=RSS_ONE)
+    if request.url.path == "/quote/199999":
+        return httpx.Response(200, text=ARCHIVE_PAGE_199999)
+    return httpx.Response(404, text="nope")
+
+
+class TestPublishCycle:
+    async def test_publishes_from_archive(self, tmp_path, monkeypatch):
+        """Граница уже известна — берётся случайная цитата из архива."""
+        import random
+
+        cfg = Config.load(
+            {
+                "TELEGRAM_BOT_TOKEN": TOKEN,
+                "DB_PATH": str(tmp_path / "state.db"),
+                "FEED_URL": "https://bashorg.local/rss/",
+                "SITE_BASE_URL": "https://bashorg.local",
+            }
+        )
+        app = App(cfg, rng=random.Random(1))
+        app.storage.set_archive_start_id(199900)
+        try:
+            client = FakeClient([])
+            rng = random.Random(2)
+            monkeypatch.setattr(rng, "randint", lambda a, b: 199999)
+            app.rng = rng
+            async with httpx.AsyncClient(transport=httpx.MockTransport(_rss_handler)) as http:
+                status = await app.publish_cycle(client, http, GROUP_ID)
+            assert status == "published"
+            assert app.storage.is_published("199999")
+            assert client.sent and "Старая цитата из архива." in client.sent[0]
+        finally:
+            app.close()
+
+    async def test_falls_back_to_feed_when_boundary_unknown(self, tmp_path, monkeypatch):
+        """Не удалось найти границу архива — публикуем из свежей ленты."""
+        import bot.app as app_module
+
+        async def _no_boundary(http, site_base_url, max_id):
+            return None
+
+        monkeypatch.setattr(app_module, "find_archive_start_id", _no_boundary)
+
+        cfg = Config.load(
+            {
+                "TELEGRAM_BOT_TOKEN": TOKEN,
+                "DB_PATH": str(tmp_path / "state.db"),
+                "FEED_URL": "https://bashorg.local/rss/",
+                "SITE_BASE_URL": "https://bashorg.local",
+            }
+        )
+        app = App(cfg)
+        try:
+            client = FakeClient([])
+            async with httpx.AsyncClient(transport=httpx.MockTransport(_rss_handler)) as http:
+                status = await app.publish_cycle(client, http, GROUP_ID)
+            assert status == "published"
+            assert app.storage.is_published("200000")
+            assert client.sent and "Свежая цитата из ленты" in client.sent[0]
+        finally:
+            app.close()
+
+    async def test_nothing_new_when_archive_empty(self, tmp_path, monkeypatch):
+        import random
+
+        cfg = Config.load(
+            {
+                "TELEGRAM_BOT_TOKEN": TOKEN,
+                "DB_PATH": str(tmp_path / "state.db"),
+                "FEED_URL": "https://bashorg.local/rss/",
+                "SITE_BASE_URL": "https://bashorg.local",
+            }
+        )
+        app = App(cfg, rng=random.Random(1))
+        app.storage.set_archive_start_id(199900)
+        try:
+            client = FakeClient([])
+            rng = random.Random(2)
+            monkeypatch.setattr(rng, "randint", lambda a, b: 199999)
+            app.rng = rng
+            app.storage.mark_published("199999")
+            async with httpx.AsyncClient(transport=httpx.MockTransport(_rss_handler)) as http:
+                status = await app.publish_cycle(client, http, GROUP_ID)
+            assert status == "nothing_new"
+            assert client.sent == []
         finally:
             app.close()

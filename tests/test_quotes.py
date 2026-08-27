@@ -5,12 +5,14 @@ from __future__ import annotations
 from datetime import datetime
 
 from bot.quotes import (
+    SITE_TZ,
     TG_MESSAGE_LIMIT,
     Quote,
     clean_quote_text,
     escape_html,
     extract_quote_id,
     format_messages,
+    parse_page_quote,
     split_text,
     utf16_len,
 )
@@ -70,6 +72,61 @@ class TestExtractQuoteId:
 class TestEscapeHtml:
     def test_escapes_specials(self):
         assert escape_html("a & b < c > d") == "a &amp; b &lt; c &gt; d"
+
+
+def page_html(
+    quote_id: int = 470009, date_text: str = "22.08.2026 в 09:10", body: str = "Хай."
+) -> str:
+    return f"""<article class="quote" data-quote="{quote_id}">
+            <div class="quote__frame">
+                <header class="quote__header">
+                    <a class="quote__header_permalink" href="/quote/{quote_id}">#{quote_id}</a>
+                    <div class="quote__header_date">
+                        {date_text}
+                    </div>
+                </header>
+                <div class="quote__body">
+                    {body}
+                </div>
+                <footer class="quote__footer">
+                </footer>
+            </div>
+        </article>"""
+
+
+class TestParsePageQuote:
+    """Страница /quote/<id> — источник цитат для архива."""
+
+    def test_parses_full_page(self):
+        quote = parse_page_quote(
+            page_html(body="Жизнь до 30: интересно.&lt;br&gt;После: понятно."), "https://башорг.рф"
+        )
+        assert quote is not None
+        assert quote.id == "470009"
+        assert quote.text == "Жизнь до 30: интересно.\nПосле: понятно."
+        assert quote.url == "https://башорг.рф/quote/470009"
+
+    def test_date_is_moscow_time(self):
+        quote = parse_page_quote(page_html(), "https://башорг.рф")
+        assert quote is not None
+        assert (quote.published_at.year, quote.published_at.hour) == (2026, 9)
+        assert quote.published_at.tzinfo is SITE_TZ
+
+    def test_stub_without_date_is_none(self):
+        assert parse_page_quote(page_html(date_text=""), "https://башорг.рф") is None
+
+    def test_garbage_date_is_none(self):
+        assert parse_page_quote(page_html(date_text="не дата"), "https://башорг.рф") is None
+
+    def test_empty_body_is_none(self):
+        assert parse_page_quote(page_html(body="   "), "https://башорг.рф") is None
+
+    def test_page_without_id_is_none(self):
+        html = page_html().replace('data-quote="470009"', "")
+        assert parse_page_quote(html, "https://башорг.рф") is None
+
+    def test_not_a_quote_page_is_none(self):
+        assert parse_page_quote("<html><body>403</body></html>", "https://башорг.рф") is None
 
 
 class TestSplitText:

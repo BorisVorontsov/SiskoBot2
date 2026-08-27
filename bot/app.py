@@ -1,6 +1,10 @@
-"""Основной цикл приложения: лента → фильтр → случайный выбор → публикация → пауза.
+"""Основной цикл приложения: архив → случайный выбор → публикация → пауза.
 
-Во время паузы бот слушает команды в группе и в личных сообщениях:
+Источник цитат — архив башорг.рф начиная с 01.01.2020 (bot/archive.py):
+бот равномерно выбирает ID из диапазона [граница 2020 года … сегодня]
+и публикует первую валидную цитату. RSS при этом нужен только для
+определения «самого свежего» ID. Во время паузы бот слушает команды
+в группе и в личных сообщениях:
 * /help — список команд;
 * /next — внеочередная публикация новой цитаты.
 """
@@ -15,9 +19,14 @@ from datetime import datetime, timedelta
 import httpx
 from telegram import Update
 
+from .archive import (
+    ARCHIVE_START_DATE,
+    find_archive_start_id,
+    pick_archive_quote,
+)
 from .config import Config
 from .feed import FeedError, fetch_feed, parse_feed
-from .quotes import format_messages
+from .quotes import Quote, format_messages
 from .scheduler import random_interval
 from .storage import Storage
 from .telegram_api import BotKickedError, TelegramClient, bot_removed_from
@@ -252,10 +261,12 @@ class App:
         http: httpx.AsyncClient,
         chat_id: int,
     ) -> str:
-        """Одна попытка опубликовать одну новую цитату.
+        """Одна попытка опубликовать одну цитату из архива.
 
         Возвращает статус; исключения Telegram пробрасываются наверх.
         Цитата помечается опубликованной строго после успешной отправки.
+        Граница архива (первая цитата с датой ARCHIVE_START_DATE) ищется
+        при первом запуске и запоминается в хранилище.
         """
         try:
             xml_text = await fetch_feed(http, self.cfg.feed_url)
@@ -268,20 +279,81 @@ class App:
             log.warning("Лента пуста — сайт отдал 0 элементов")
             return STATUS_FEED_ERROR
 
+        ids = [int(q.id) for q in quotes if q.id.isdigit()]
+        if not ids:
+            log.warning("В ленте нет цитат с числовым ID — не от чего считать границу")
+            return STATUS_FEED_ERROR
+        max_id = max(ids)
         seen = self.storage.published_ids()
+
+        start_id = self.storage.get_archive_start_id()
+        if start_id is None:
+            start_id = await self._ensure_archive_start(http, max_id)
+            if start_id is None:
+                return await self._publish_from_feed(client, chat_id, quotes, seen)
+
+        try:
+            quote = await pick_archive_quote(
+                http, self.cfg.site_base_url, start_id, max_id, seen, self.rng
+            )
+        except FeedError as exc:
+            log.warning("Ошибка архива: %s", exc)
+            return STATUS_FEED_ERROR
+
+        if quote is None:
+            log.info(
+                "Цитат из архива #%d..#%d не нашлось (уже опубликовано: %d)",
+                start_id,
+                max_id,
+                len(seen),
+            )
+            return STATUS_NOTHING_NEW
+
+        log.info("Выбрана цитата #%s из архива (дата на сайте: %s)", quote.id, quote.published_at)
+        return await self._publish(client, chat_id, quote)
+
+    async def _ensure_archive_start(self, http: httpx.AsyncClient, max_id: int) -> int | None:
+        """Ищет и запоминает ID первой цитаты от ARCHIVE_START_DATE; None — не вышло."""
+        log.info("Граница архива ещё не найдена: ищу начало с %s", ARCHIVE_START_DATE.isoformat())
+        try:
+            start_id = await find_archive_start_id(http, self.cfg.site_base_url, max_id)
+        except FeedError as exc:
+            log.warning("Не удалось определить границу архива: %s", exc)
+            return None
+        if start_id is None:
+            log.warning("Граница архива не найдена — сайт не отдаёт таких старых цитат?")
+            return None
+        self.storage.set_archive_start_id(start_id)
+        log.info("Граница архива: цитата #%d (с %s)", start_id, ARCHIVE_START_DATE.isoformat())
+        return start_id
+
+    async def _publish_from_feed(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        quotes: list[Quote],
+        seen: set[str],
+    ) -> str:
+        """Резерв: при сбое поиска границы архива публикуем из свежей ленты."""
         fresh = [quote for quote in quotes if quote.id not in seen]
         log.info(
             "Всего в ленте %d, уже публиковалось %d, новых %d", len(quotes), len(seen), len(fresh)
         )
         if not fresh:
             return STATUS_NOTHING_NEW
-
         quote = self.rng.choice(fresh)
-        log.info("Выбрана цитата #%s из %d новых", quote.id, len(fresh))
+        log.info("Выбрана цитата #%s из %d новых (резерв ленты)", quote.id, len(fresh))
+        return await self._publish(client, chat_id, quote)
 
+    async def _publish(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        quote: Quote,
+    ) -> str:
+        """Отправка в чат и отметка в хранилище (только после успеха)."""
         messages = format_messages(quote)
         await client.send_messages(chat_id, messages)
-
         self.storage.mark_published(quote.id)
         log.info(
             "Опубликовано #%s; всего опубликовано: %d",

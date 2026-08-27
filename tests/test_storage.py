@@ -68,6 +68,43 @@ class TestChatState:
         storage.close()
 
 
+class TestArchiveState:
+    def test_default_is_none(self, tmp_path):
+        storage = Storage(tmp_path / "state.db")
+        assert storage.get_archive_start_id() is None
+        storage.close()
+
+    def test_round_trip(self, tmp_path):
+        storage = Storage(tmp_path / "state.db")
+        storage.set_archive_start_id(155000)
+        assert storage.get_archive_start_id() == 155000
+        storage.close()
+
+    def test_set_overwrites(self, tmp_path):
+        storage = Storage(tmp_path / "state.db")
+        storage.set_archive_start_id(1)
+        storage.set_archive_start_id(255000)
+        assert storage.get_archive_start_id() == 255000
+        storage.close()
+
+    def test_corrupted_value_ignored(self, tmp_path):
+        path = tmp_path / "state.db"
+        storage = Storage(path)
+        storage._conn.execute("INSERT INTO state (key, value) VALUES ('archive_start_id', 'много')")
+        assert storage.get_archive_start_id() is None
+        storage.close()
+
+    def test_survives_restart(self, tmp_path):
+        path = tmp_path / "state.db"
+        first = Storage(path)
+        first.set_archive_start_id(300000)
+        first.close()
+
+        second = Storage(path)
+        assert second.get_archive_start_id() == 300000
+        second.close()
+
+
 class TestFilteringScenario:
     def test_fresh_quotes_filtered_against_storage(self, tmp_path):
         """Сценарий выбора: из ленты отсеиваются уже опубликованные."""
